@@ -15,10 +15,11 @@ namespace GBelenky.TableBackup
     public class TableBackup
     {
         private readonly BlobContainerClient _blobContainerClient;
-
-        public TableBackup(BlobContainerClient blobContainerClient)
+        private readonly TableClient _tableClient;
+        public TableBackup(BlobContainerClient blobContainerClient, TableClient tableClient)
         {
             _blobContainerClient = blobContainerClient;
+            _tableClient = tableClient;
         }
 
 
@@ -27,53 +28,76 @@ namespace GBelenky.TableBackup
              [OrchestrationTrigger] TaskOrchestrationContext context)
         {
             ILogger logger = context.CreateReplaySafeLogger(nameof(TableBackup));
-            logger.LogInformation("Reading all table entities");
+            var backupBlobSetting = Environment.GetEnvironmentVariable("BackupBlob");
 
-            var tableConnectionString = Environment.GetEnvironmentVariable("TableStorageConnection");
-            var tableClient = new TableClient(new Uri(tableConnectionString));
-            var backupBlob = Environment.GetEnvironmentVariable("BackupBlob");
-            
             DateTime now = context.CurrentUtcDateTime;
-            string filePrefix = $"{now.Year}-{now.Month}-{now.Day}-{now.Hour}-{now.Minute}-{now.Second}-";
-            backupBlob = filePrefix + backupBlob;
+            //string filePrefix = $"{now.Year}-{now.Month}-{now.Day}-{now.Hour}-{now.Minute}-{now.Second}-";
+            string filePrefix = context.InstanceId + "-";
+            string backupBlob = filePrefix + backupBlobSetting;
 
-            int pageSize = 1000;
-            string? continuationToken = null;
-            do
+            int pageSizeSetting = Int32.Parse(Environment.GetEnvironmentVariable("PageSize"));
+            // min valid date for Azure Table Storage
+            DateTime earliestRowDate = new DateTime(1601, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            logger.LogInformation($"Starting backup at: {now}}}");
+
+            TimeStampParams timeStampParams = new TimeStampParams { NextTimeSlot = earliestRowDate, PageSize = pageSizeSetting, BackupBlob = backupBlob };
+            DateTime? lastRowDate = earliestRowDate;
+            int pages = 0;
+            while ( DateTime.Compare((DateTime)lastRowDate, DateTime.MinValue) != 0)
             {
-                var page = tableClient.Query<TableEntity>().AsPages(continuationToken, pageSize).First();
-                var json = JsonSerializer.Serialize(page.Values);
-                ActivityParams activityParams = new ActivityParams { Json = json, BackupBlob = backupBlob };
-                await context.CallActivityAsync(nameof(BackupPage), activityParams);
-                continuationToken = page.ContinuationToken;
-            } while (continuationToken != null);
+                lastRowDate = await context.CallActivityAsync<DateTime?>(nameof(BackupPageByTimestamp), timeStampParams);
+                if (lastRowDate != null)
+                {
+                    timeStampParams.NextTimeSlot = (DateTime)lastRowDate;
+                }
+                pages++;
+                logger.LogInformation($"Page {pages} with page size {pageSizeSetting} backed up");
+            }
 
+            DateTime end = context.CurrentUtcDateTime;
+            logger.LogInformation($"Backup completed at: {end}");
             return;
         }
 
-        [Function(nameof(BackupPage))]
-        public async Task BackupPage([ActivityTrigger] ActivityParams aParams, FunctionContext executionContext)
+        [Function(nameof(BackupPageByTimestamp))]
+        public async Task<DateTime> BackupPageByTimestamp([ActivityTrigger] TimeStampParams aParams, FunctionContext executionContext)
         {
-            ILogger logger = executionContext.GetLogger("BackupPage");
-            logger.LogInformation("Writing page to blob storage");
-            
-
+            ILogger logger = executionContext.GetLogger("BackupPageByTimestamp");
+            string nextTimeSlotString = aParams.NextTimeSlot.ToString("o");
             // Get a reference to the container and the append blob
             var appendBlobClient = _blobContainerClient.GetAppendBlobClient(aParams.BackupBlob);
 
             // Create the append blob if it doesn't exist
             await appendBlobClient.CreateIfNotExistsAsync();
 
-            // Convert the JSON string to bytes
-            byte[] bytes = Encoding.UTF8.GetBytes(aParams.Json);
+            var queryFilter = TableClient.CreateQueryFilter($"Timestamp gt datetime{nextTimeSlotString}");
+            logger.LogInformation($"query filter: {queryFilter} with page size: {aParams.PageSize}");
 
-            // Write the bytes to the append blob
-            using (var memoryStream = new MemoryStream(bytes))
+            Azure.AsyncPageable<TableEntity> entities = _tableClient.QueryAsync<TableEntity>(
+                filter: queryFilter, maxPerPage: aParams.PageSize);
+
+            // Get the first page of results
+            DateTime? lastRowDate = new DateTime();
+            await foreach (Azure.Page<TableEntity> page in entities.AsPages())
             {
-                await appendBlobClient.AppendBlockAsync(memoryStream);
-            }
+                // get last timestamp
+                foreach (TableEntity entity in page.Values)
+                {
+                    lastRowDate = entity.GetDateTime("Timestamp");
+                    logger.LogInformation($"BackupId: {aParams.BackupBlob} PartitionKey: {entity.PartitionKey} EntityKey: {entity.RowKey}");
+                }
 
-            return;
+                var json = JsonSerializer.Serialize(page.Values);
+                byte[] bytes = Encoding.UTF8.GetBytes(json);
+                // Write the bytes to the append blob
+                using (var memoryStream = new MemoryStream(bytes))
+                {
+                    await appendBlobClient.AppendBlockAsync(memoryStream);
+                }
+                break; // Exit after the first page
+
+            }
+            return (DateTime)lastRowDate;
         }
 
         [Function("TableBackup_HttpStart")]
@@ -85,8 +109,13 @@ namespace GBelenky.TableBackup
             ILogger logger = executionContext.GetLogger("TableBackup_HttpStart");
 
             // Function input comes from the request content.
+            DateTime now = DateTime.UtcNow;            
+            StartOrchestrationOptions? options = new StartOrchestrationOptions()
+            {
+                InstanceId = $"{now.Year}-{now.Month}-{now.Day}-{now.Hour}-{now.Minute}-{now.Second}"
+            };  
             string instanceId = await client.ScheduleNewOrchestrationInstanceAsync(
-                nameof(TableBackup));
+                nameof(TableBackup), options: options, input: null);
 
             logger.LogInformation("Started orchestration with ID = '{instanceId}'.", instanceId);
 
@@ -96,9 +125,10 @@ namespace GBelenky.TableBackup
         }
     }
 
-    public class ActivityParams
+    public class TimeStampParams
     {
-        public string Json { get; set; }
+        public DateTime NextTimeSlot { get; set; }
+        public int PageSize { get; set; }
         public string BackupBlob { get; set; }
     }
 }
