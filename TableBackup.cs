@@ -59,7 +59,7 @@ namespace GBelenky.TableBackup
             }
 
             DateTime end = context.CurrentUtcDateTime;
-            logger.LogInformation($"Backup completed with Total Rows: {rowCount} Pages: {pages} Last row date: {lastRowDate}");
+            logger.LogInformation($"Backup completed with Total Rows: {rowCount} Pages: {pages} Last row date: {lastRowDate} Total Time in minutes: {(end - now).Minutes}");
             return;
         }
 
