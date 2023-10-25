@@ -29,37 +29,38 @@ namespace GBelenky.TableBackup
              [OrchestrationTrigger] TaskOrchestrationContext context)
         {
             ILogger logger = context.CreateReplaySafeLogger(nameof(TableBackup));
-            var backupBlobSetting = Environment.GetEnvironmentVariable("BackupBlob");
+            string backupBlobSetting = Environment.GetEnvironmentVariable("BackupBlob") ?? "backup.json";
 
             DateTime now = context.CurrentUtcDateTime;
-            //string filePrefix = $"{now.Year}-{now.Month}-{now.Day}-{now.Hour}-{now.Minute}-{now.Second}-";
             string filePrefix = context.InstanceId + "-";
             string backupBlob = filePrefix + backupBlobSetting;
 
-            int pageSizeSetting = Int32.Parse(Environment.GetEnvironmentVariable("PageSize"));
+            int pageSizeSetting = Int32.Parse(Environment.GetEnvironmentVariable("PageSize") ?? "100");
+
             // min valid date for Azure Table Storage
             DateTime earliestRowDate = new DateTime(1601, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             logger.LogInformation($"Starting backup at: {now}}}");
 
             TimeStampParams timeStampParams = new TimeStampParams { NextTimeSlot = earliestRowDate, PageSize = pageSizeSetting, BackupBlob = backupBlob };
-            DateTime? lastRowDate = earliestRowDate;
+            DateTime lastRowDate = earliestRowDate;
             int pages = 0;
             int rowCount = 0;
-            while ( DateTime.Compare((DateTime)lastRowDate, DateTime.MinValue) != 0)
-            {
-                BackupResponse bResponse = await context.CallActivityAsync<BackupResponse?>(nameof(BackupPageByTimestamp), timeStampParams);
-                lastRowDate = bResponse.lastRowDate;
-                if (lastRowDate != null)
-                {
-                    timeStampParams.NextTimeSlot = (DateTime)lastRowDate;
-                }
-                pages++;
-                rowCount += bResponse.rowCount;
-                logger.LogInformation($"Backup of Total Rows: {rowCount} Pages: {pages} Last row date: {lastRowDate}");
-            }
 
+            while (DateTime.Compare(lastRowDate, DateTime.MinValue) != 0)
+            {
+                BackupResponse bResponse = await context.CallActivityAsync<BackupResponse>(nameof(BackupPageByTimestamp), timeStampParams);
+                if (bResponse != null)
+                {
+                    lastRowDate = bResponse.lastRowDate;
+                    timeStampParams.NextTimeSlot = lastRowDate;
+                    pages++;
+                    rowCount += bResponse.rowCount;
+                    logger.LogInformation($"Backup of Total Rows: {rowCount} Pages: {pages} Last row date: {lastRowDate}");
+                }
+            
+            }
             DateTime end = context.CurrentUtcDateTime;
-            logger.LogInformation($"Backup completed with Total Rows: {rowCount} Pages: {pages} Last row date: {lastRowDate} Total Time in minutes: {(end - now).Minutes}");
+            logger.LogInformation($"Backup completed with Total Rows: {rowCount} Pages: {pages} Last row date: {lastRowDate} Total Time seconds : {(end - now).TotalSeconds}");
             return;
         }
 
@@ -101,7 +102,6 @@ namespace GBelenky.TableBackup
                     await appendBlobClient.AppendBlockAsync(memoryStream);
                 }
                 break; // Exit after the first page
-
             }
             return new BackupResponse { rowCount = rowCount, lastRowDate = (DateTime)lastRowDate };
         }
@@ -115,11 +115,11 @@ namespace GBelenky.TableBackup
             ILogger logger = executionContext.GetLogger("TableBackup_HttpStart");
 
             // Function input comes from the request content.
-            DateTime now = DateTime.UtcNow;            
+            DateTime now = DateTime.UtcNow;
             StartOrchestrationOptions? options = new StartOrchestrationOptions()
             {
                 InstanceId = $"{now.Year}-{now.Month}-{now.Day}-{now.Hour}-{now.Minute}-{now.Second}"
-            };  
+            };
             string instanceId = await client.ScheduleNewOrchestrationInstanceAsync(
                 nameof(TableBackup), options: options, input: null);
 
@@ -133,14 +133,14 @@ namespace GBelenky.TableBackup
 
     public class TimeStampParams
     {
-        public DateTime NextTimeSlot { get; set; }
+        public DateTime NextTimeSlot { get; set; } = DateTime.MinValue;
         public int PageSize { get; set; }
-        public string BackupBlob { get; set; }
+        public required string BackupBlob { get; set; }
     }
 
     public class BackupResponse
     {
-        public int rowCount { get; set; }
-        public DateTime lastRowDate { get; set; }
-      }
+        public int rowCount { get; set; } = 0;
+        public DateTime lastRowDate { get; set; } = DateTime.MinValue;
+    }
 }

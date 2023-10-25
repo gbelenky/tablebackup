@@ -9,8 +9,14 @@ var host = new HostBuilder()
     {
         string? blobConnectionString = Environment.GetEnvironmentVariable("BlobStorageConnection");
         string? tableStorageConnection = Environment.GetEnvironmentVariable("TableStorageConnection");
-        s.AddSingleton(x => new TableClient(new Uri(tableStorageConnection)));
-        s.AddSingleton(x => new BlobContainerClient (new Uri(blobConnectionString)));
+        if (tableStorageConnection != null)
+        {
+            s.AddSingleton(x => new TableClient(new Uri(tableStorageConnection)));
+        }
+        if (blobConnectionString != null)
+        {
+            s.AddSingleton(x => new BlobContainerClient(new Uri(blobConnectionString)));
+        }
     })
     .Build();
 
