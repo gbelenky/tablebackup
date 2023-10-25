@@ -8,6 +8,7 @@ using Azure.Storage.Blobs;
 using System.Text.Json;
 using System.Text;
 using Azure.Storage.Blobs.Specialized;
+using Azure;
 
 
 namespace GBelenky.TableBackup
@@ -43,24 +44,27 @@ namespace GBelenky.TableBackup
             TimeStampParams timeStampParams = new TimeStampParams { NextTimeSlot = earliestRowDate, PageSize = pageSizeSetting, BackupBlob = backupBlob };
             DateTime? lastRowDate = earliestRowDate;
             int pages = 0;
+            int rowCount = 0;
             while ( DateTime.Compare((DateTime)lastRowDate, DateTime.MinValue) != 0)
             {
-                lastRowDate = await context.CallActivityAsync<DateTime?>(nameof(BackupPageByTimestamp), timeStampParams);
+                BackupResponse bResponse = await context.CallActivityAsync<BackupResponse?>(nameof(BackupPageByTimestamp), timeStampParams);
+                lastRowDate = bResponse.lastRowDate;
                 if (lastRowDate != null)
                 {
                     timeStampParams.NextTimeSlot = (DateTime)lastRowDate;
                 }
                 pages++;
-                logger.LogInformation($"Page {pages} with page size {pageSizeSetting} backed up");
+                rowCount += bResponse.rowCount;
+                logger.LogInformation($"Backup of Total Rows: {rowCount} Pages: {pages} Last row date: {lastRowDate}");
             }
 
             DateTime end = context.CurrentUtcDateTime;
-            logger.LogInformation($"Backup completed at: {end}");
+            logger.LogInformation($"Backup completed with Total Rows: {rowCount} Pages: {pages} Last row date: {lastRowDate}");
             return;
         }
 
         [Function(nameof(BackupPageByTimestamp))]
-        public async Task<DateTime> BackupPageByTimestamp([ActivityTrigger] TimeStampParams aParams, FunctionContext executionContext)
+        public async Task<BackupResponse> BackupPageByTimestamp([ActivityTrigger] TimeStampParams aParams, FunctionContext executionContext)
         {
             ILogger logger = executionContext.GetLogger("BackupPageByTimestamp");
             string nextTimeSlotString = aParams.NextTimeSlot.ToString("o");
@@ -78,12 +82,14 @@ namespace GBelenky.TableBackup
 
             // Get the first page of results
             DateTime? lastRowDate = new DateTime();
+            int rowCount = 0;
             await foreach (Azure.Page<TableEntity> page in entities.AsPages())
             {
                 // get last timestamp
                 foreach (TableEntity entity in page.Values)
                 {
                     lastRowDate = entity.GetDateTime("Timestamp");
+                    rowCount++;
                     logger.LogInformation($"BackupId: {aParams.BackupBlob} PartitionKey: {entity.PartitionKey} EntityKey: {entity.RowKey}");
                 }
 
@@ -97,7 +103,7 @@ namespace GBelenky.TableBackup
                 break; // Exit after the first page
 
             }
-            return (DateTime)lastRowDate;
+            return new BackupResponse { rowCount = rowCount, lastRowDate = (DateTime)lastRowDate };
         }
 
         [Function("TableBackup_HttpStart")]
@@ -131,4 +137,10 @@ namespace GBelenky.TableBackup
         public int PageSize { get; set; }
         public string BackupBlob { get; set; }
     }
+
+    public class BackupResponse
+    {
+        public int rowCount { get; set; }
+        public DateTime lastRowDate { get; set; }
+      }
 }
